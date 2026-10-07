@@ -1,0 +1,52 @@
+#!/bin/sh
+# The Whitespace evaluator (json2dir.ws, generated from json2dir.wsf by tools/wsforth.py and
+# tools/wsasm.py, run by the whitespacers interpreter `wsc`) owns UTF-8 checking, JSON
+# parsing, validation and shell generation; this launcher only moves bytes and runs the
+# generated script.
+#
+# Transport framing only: Whitespace's readc cannot signal end of input (wsc stops with an
+# I/O error), so the evaluator is fed the byte count as a decimal line, then the document
+# unchanged.
+set -eu
+
+if [ "$#" -ne 0 ]; then
+  printf '%s\n' 'Usage: json2dir < file.json' >&2
+  exit 2
+fi
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+task_tmp=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/json2dir.XXXXXXXXXX")
+trap 'rm -rf -- "$task_tmp"' 0
+trap 'exit 1' HUP INT TERM
+
+if ! (umask 077; cat > "$task_tmp/input.json"); then
+  printf '%s\n' "json2dir: couldn't read stdin" >&2
+  exit 1
+fi
+
+# --unchecked-heap: unset heap cells read as 0 (as in the reference interpreter's
+# zero-filled heap) instead of being an error.
+if ! (
+  umask 077
+  {
+    printf '%d\n' "$(wc -c < "$task_tmp/input.json")"
+    cat "$task_tmp/input.json"
+  } | "${JSON2DIR_WSC:-wsc}" --unchecked-heap "$script_dir/json2dir.ws" > "$task_tmp/tree.sh"
+); then
+  printf '%s\n' 'json2dir: the evaluator failed' >&2
+  exit 1
+fi
+
+# Whitespace has no stderr and no exit code: the script is only run if the evaluator
+# wrote its end marker as the last line; otherwise its last line is its error message.
+last=$(tail -n 1 "$task_tmp/tree.sh")
+if [ "$last" != '# json2dir: end' ]; then
+  case $last in
+    'json2dir: '*) printf '%s\n' "$last" >&2 ;;
+    *) printf '%s\n' 'json2dir: the evaluator did not finish' >&2 ;;
+  esac
+  exit 1
+fi
+
+"${JSON2DIR_SHELL:-/bin/sh}" "$task_tmp/tree.sh"
